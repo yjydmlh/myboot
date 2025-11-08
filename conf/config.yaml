@@ -1,0 +1,34 @@
+# MyBoot 应用配置文件
+
+# 应用配置
+app:
+  name: "MyBoot App"
+  version: "0.1.0"
+
+# 服务器配置
+server:
+  port: 8000
+  reload: true
+  workers: 1
+  keep_alive_timeout: 5
+  graceful_timeout: 30
+  # CORS 配置（可选，如果不存在则不启用 CORS）
+  cors:
+    allow_origins: ["*"]
+    allow_credentials: true
+    allow_methods: ["*"]
+    allow_headers: ["*"]
+  response_format:
+    enabled: true # 是否启用自动格式化
+    exclude_paths: # 排除的路径（这些路径不会自动格式化）
+      - "/docs"
+
+# 日志配置
+logging:
+  level: "debug"
+
+# 任务调度配置
+scheduler:
+  enabled: true
+  timezone: "UTC"
+  max_workers: 10

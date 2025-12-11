@@ -170,83 +170,6 @@ async def browser_only_middleware(request, next_handler):
     return response
 
 
-# ==================== 路由层 ====================
-
-@get('/')
-def home():
-    """首页 - 自动注册为 GET /"""
-    return {
-        "message": "欢迎使用 MyBoot 约定优于配置示例",
-        "features": [
-            "自动发现组件",
-            "约定优于配置",
-            "零配置启动",
-            "自动注册服务"
-        ]
-    }
-
-
-@get('/users')
-def get_users():
-    """获取用户列表 - 自动注册为 GET /users"""
-    from myboot.core.application import app
-    user_service = app().get_service('user_service')
-    return {"users": list(user_service.users.values())}
-
-
-@get('/users/{user_id}')
-def get_user(user_id: int):
-    """获取单个用户 - 自动注册为 GET /users/{user_id}"""
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-    return user_service.get_user(user_id)
-
-
-@post('/users')
-def create_user(name: str, email: str):
-    """创建用户 - 自动注册为 POST /users"""
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-    email_service = get_service('email_service')
-    user = user_service.create_user(name, email)
-    email_service.send_email(email, "欢迎注册", f"欢迎 {name} 注册我们的服务！")
-
-    return {"message": "用户创建成功", "user": user}
-
-
-@put('/users/{user_id}')
-def update_user(user_id: int, name: str = None, email: str = None):
-    """更新用户 - 自动注册为 PUT /users/{user_id}"""
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-
-    update_data = {}
-    if name:
-        update_data['name'] = name
-    if email:
-        update_data['email'] = email
-
-    user = user_service.update_user(user_id, **update_data)
-    if user:
-        return {"message": "用户更新成功", "user": user}
-    else:
-        return {"error": "用户不存在"}
-
-
-@delete('/users/{user_id}')
-def delete_user(user_id: int):
-    """删除用户 - 自动注册为 DELETE /users/{user_id}"""
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-
-    user = user_service.delete_user(user_id)
-
-    if user:
-        return {"message": "用户删除成功", "user": user}
-    else:
-        return {"error": "用户不存在"}
-
-
 # ==================== 定时任务组件 ====================
 # 注意：定时任务必须在 @component 装饰的类中定义，支持依赖注入
 
@@ -275,44 +198,110 @@ class ScheduledJobs:
 
 
 # ==================== REST 控制器 ====================
+# 注意：路由必须在 @rest_controller 装饰的类中定义
+
+@rest_controller('/')
+class HomeController:
+    """首页控制器"""
+    
+    @get('/')
+    def home(self):
+        """首页 - GET /"""
+        return {
+            "message": "欢迎使用 MyBoot 约定优于配置示例",
+            "features": [
+                "自动发现和注册组件",
+                "约定优于配置",
+                "零配置启动",
+                "REST 控制器",
+                "依赖注入",
+                "定时任务"
+            ]
+        }
+
+
+@rest_controller('/api/users')
+class UserController:
+    """用户控制器 - 使用依赖注入"""
+    
+    def __init__(self, user_service: UserService, email_service: EmailService):
+        self.user_service = user_service
+        self.email_service = email_service
+    
+    @get('/')
+    def list_users(self):
+        """获取用户列表 - GET /api/users"""
+        return {"users": list(self.user_service.users.values())}
+    
+    @get('/{user_id}')
+    def get_user(self, user_id: int):
+        """获取单个用户 - GET /api/users/{user_id}"""
+        return self.user_service.get_user(user_id)
+    
+    @post('/')
+    def create_user(self, name: str, email: str):
+        """创建用户 - POST /api/users"""
+        user = self.user_service.create_user(name, email)
+        self.email_service.send_email(email, "欢迎注册", f"欢迎 {name} 注册我们的服务！")
+        return {"message": "用户创建成功", "user": user}
+    
+    @put('/{user_id}')
+    def update_user(self, user_id: int, name: str = None, email: str = None):
+        """更新用户 - PUT /api/users/{user_id}"""
+        update_data = {}
+        if name:
+            update_data['name'] = name
+        if email:
+            update_data['email'] = email
+        
+        user = self.user_service.update_user(user_id, **update_data)
+        if user:
+            return {"message": "用户更新成功", "user": user}
+        return {"error": "用户不存在"}
+    
+    @delete('/{user_id}')
+    def delete_user(self, user_id: int):
+        """删除用户 - DELETE /api/users/{user_id}"""
+        user = self.user_service.delete_user(user_id)
+        if user:
+            return {"message": "用户删除成功", "user": user}
+        return {"error": "用户不存在"}
+
 
 @rest_controller('/api/products')
 class ProductController:
-    """产品控制器 - 自动生成 RESTful 路由"""
+    """产品控制器 - 使用依赖注入"""
 
-    def __init__(self):
+    def __init__(self, redis_client: RedisClient):
+        self.redis_client = redis_client
         self.products = {
             1: {"id": 1, "name": "产品1", "price": 100},
             2: {"id": 2, "name": "产品2", "price": 200}
         }
 
-    @get("/api/products")
-    def list(self):
-        """GET /api/products 或 GET /api/products/{product_id}"""
-        from myboot.core.application import get_client
-        redis_client = get_client('redis_client')
-        if redis_client:
-            print(redis_client.get('app_status'))
+    @get('/')
+    def list_products(self):
+        """获取产品列表 - GET /api/products"""
+        if self.redis_client:
+            print(self.redis_client.get('app_status'))
         return {"products": list(self.products.values())}
 
-    @get("/api/products/{product_id}")
-    def get(self, product_id: int = None):
-        """GET /api/products 或 GET /api/products/{product_id}"""
-        if product_id:
-            return self.products.get(product_id, {"error": "产品不存在"})
-        return {"products": list(self.products.values())}
+    @get('/{product_id}')
+    def get_product(self, product_id: int):
+        """获取单个产品 - GET /api/products/{product_id}"""
+        return self.products.get(product_id, {"error": "产品不存在"})
 
-    @post("/api/products")
-    def post(self, name: str, price: float):
-        """POST /api/products"""
+    @post('/')
+    def create_product(self, name: str, price: float):
+        """创建产品 - POST /api/products"""
         product_id = max(self.products.keys()) + 1
         product = {"id": product_id, "name": name, "price": price}
         self.products[product_id] = product
         return {"message": "产品创建成功", "product": product}
 
-    @put("/api/products/{product_id}")
-    def put(self, product_id: int, name: str = None, price: float = None):
-        """PUT /api/products/{product_id}"""
+    @put('/{product_id}')
+    def update_product(self, product_id: int, name: str = None, price: float = None):
+        """更新产品 - PUT /api/products/{product_id}"""
         if product_id not in self.products:
             return {"error": "产品不存在"}
 
@@ -323,9 +312,9 @@ class ProductController:
 
         return {"message": "产品更新成功", "product": self.products[product_id]}
 
-    @delete("/api/products/{product_id}")
-    def delete(self, product_id: int):
-        """DELETE /api/products/{product_id}"""
+    @delete('/{product_id}')
+    def delete_product(self, product_id: int):
+        """删除产品 - DELETE /api/products/{product_id}"""
         if product_id in self.products:
             product = self.products.pop(product_id)
             return {"message": "产品删除成功", "product": product}
@@ -427,17 +416,18 @@ if __name__ == "__main__":
     print("  • API 文档: http://localhost:8000/docs")
     print("  • 健康检查: http://localhost:8000/health")
     print()
-    print("📚 API 端点:")
-    print("  • GET  /                    - 首页")
-    print("  • GET  /users               - 用户列表")
-    print("  • GET  /users/{id}          - 获取用户")
-    print("  • POST /users               - 创建用户")
-    print("  • PUT  /users/{id}          - 更新用户")
-    print("  • DELETE /users/{id}        - 删除用户")
-    print("  • GET  /api/products        - 产品列表")
-    print("  • POST /api/products        - 创建产品")
-    print("  • PUT  /api/products/{id}   - 更新产品")
-    print("  • DELETE /api/products/{id} - 删除产品")
+    print("📚 API 端点（通过 @rest_controller 定义）:")
+    print("  • GET  /                        - 首页")
+    print("  • GET  /api/users               - 用户列表")
+    print("  • GET  /api/users/{id}          - 获取用户")
+    print("  • POST /api/users               - 创建用户")
+    print("  • PUT  /api/users/{id}          - 更新用户")
+    print("  • DELETE /api/users/{id}        - 删除用户")
+    print("  • GET  /api/products            - 产品列表")
+    print("  • GET  /api/products/{id}       - 获取产品")
+    print("  • POST /api/products            - 创建产品")
+    print("  • PUT  /api/products/{id}       - 更新产品")
+    print("  • DELETE /api/products/{id}     - 删除产品")
     print()
     print("⏰ 定时任务（通过 @component 组件定义）:")
     print("  • 心跳检测 (每分钟)")

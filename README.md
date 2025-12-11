@@ -65,25 +65,32 @@ if __name__ == "__main__":
     app.run()
 ```
 
-在 `app/api/` 目录中定义路由：
+在 `app/api/` 目录中定义路由（使用 `@rest_controller` 装饰器）：
 
 ```python
 """app/api/routes.py"""
-from myboot.core.decorators import get, post
-from myboot.core.application import get_service
+from myboot.core.decorators import rest_controller, get, post
 
-@get("/")
-def hello():
-    """Hello World 接口"""
-    return {"message": "Hello, MyBoot!", "status": "success"}
+@rest_controller('/api')
+class HelloController:
+    """Hello 控制器"""
 
-@get("/users/{user_id}")
-def get_user(user_id: int):
-    """获取用户"""
-    user_service = get_service('user_service')
-    if user_service:
-        return user_service.get_user(user_id)
-    return {"user_id": user_id, "message": "用户服务未找到"}
+    @get('/')
+    def hello(self):
+        """Hello World 接口 - GET /api"""
+        return {"message": "Hello, MyBoot!", "status": "success"}
+
+@rest_controller('/api/users')
+class UserController:
+    """用户控制器 - 支持依赖注入"""
+
+    def __init__(self, user_service: UserService):
+        self.user_service = user_service
+
+    @get('/{user_id}')
+    def get_user(self, user_id: int):
+        """获取用户 - GET /api/users/{user_id}"""
+        return self.user_service.get_user(user_id)
 ```
 
 ### 运行应用
@@ -110,8 +117,7 @@ MyBoot 框架的核心设计理念是"约定优于配置"，让您能够快速�
 ### 自动发现和注册
 
 ```python
-from myboot.core.decorators import service, get, cron, component
-from myboot.core.application import get_service
+from myboot.core.decorators import service, rest_controller, get, cron, component
 
 @service()
 class UserService:
@@ -119,17 +125,22 @@ class UserService:
     def get_user(self, user_id):
         return {"id": user_id, "name": f"用户{user_id}"}
 
-@get('/users/{user_id}')
-def get_user(user_id: int):
-    """获取用户 - 自动注册路由"""
-    # 使用全局函数获取服务（推荐方式）
-    user_service = get_service('user_service')
-    return user_service.get_user(user_id)
+@rest_controller('/api/users')
+class UserController:
+    """用户控制器 - 支持依赖注入"""
+
+    def __init__(self, user_service: UserService):
+        self.user_service = user_service
+
+    @get('/{user_id}')
+    def get_user(self, user_id: int):
+        """获取用户 - GET /api/users/{user_id}"""
+        return self.user_service.get_user(user_id)
 
 @component()
 class ScheduledJobs:
     """定时任务组件 - 使用 @component 装饰器定义定时任务"""
-    
+
     @cron('0 */5 * * * *')
     def cleanup_task(self):
         """清理任务 - 自动注册定时任务"""
@@ -198,75 +209,81 @@ class OrderService:
 
 #### 获取服务 (get_service)
 
-服务是通过 `@service()` 装饰器自动注册的，可以通过以下两种方式获取：
+服务是通过 `@service()` 装饰器自动注册的。**推荐方式：在控制器构造函数中通过类型注解自动注入。**
 
-**方式一：通过全局函数（推荐）**
+**方式一：依赖注入（推荐）**
+
+```python
+from myboot.core.decorators import rest_controller, get, service
+
+@service()
+class UserService:
+    def get_user(self, user_id: int):
+        return {"user_id": user_id}
+
+@rest_controller('/api/users')
+class UserController:
+    def __init__(self, user_service: UserService):
+        # 通过构造函数自动注入服务
+        self.user_service = user_service
+
+    @get('/{user_id}')
+    def get_user(self, user_id: int):
+        return self.user_service.get_user(user_id)
+```
+
+**方式二：通过全局函数（适用于非控制器场景）**
 
 ```python
 from myboot.core.application import get_service
 
-@get('/users/{user_id}')
-def get_user(user_id: int):
-    """获取用户"""
-    # 使用全局函数获取服务（最简单的方式）
+# 在启动钩子或其他地方获取服务
+def some_function():
     user_service = get_service('user_service')
-    return user_service.get_user(user_id)
-```
-
-**方式二：通过应用实例**
-
-```python
-from myboot.core.application import get_app
-
-@get('/users/{user_id}')
-def get_user(user_id: int):
-    """获取用户"""
-    # 通过应用实例获取服务
-    app = get_app()
-    user_service = app.get_service('user_service')
-    return user_service.get_user(user_id)
+    return user_service.get_user(1)
 ```
 
 #### 获取客户端 (get_client)
 
-客户端是通过 `@client()` 装饰器自动注册的，可以通过以下两种方式获取：
+客户端是通过 `@client()` 装饰器自动注册的。**推荐方式：在控制器构造函数中通过类型注解自动注入。**
 
-**方式一：通过全局函数（推荐）**
+**方式一：依赖注入（推荐）**
+
+```python
+from myboot.core.decorators import rest_controller, get, client
+
+@client()
+class RedisClient:
+    def get(self, key: str):
+        return None
+
+@rest_controller('/api/products')
+class ProductController:
+    def __init__(self, redis_client: RedisClient):
+        # 通过构造函数自动注入客户端
+        self.redis_client = redis_client
+
+    @get('/')
+    def get_products(self):
+        cache_data = self.redis_client.get('products')
+        return {"products": cache_data or []}
+```
+
+**方式二：通过全局函数（适用于非控制器场景）**
 
 ```python
 from myboot.core.application import get_client
 
-@get('/api/products')
-def get_products():
-    """获取产品列表"""
-    # 使用全局函数获取客户端
+# 在启动钩子或其他地方获取客户端
+def some_function():
     redis_client = get_client('redis_client')
-    if redis_client:
-        cache_data = redis_client.get('products')
-    return {"products": []}
-```
-
-**方式二：通过应用实例**
-
-```python
-from myboot.core.application import get_app
-
-@get('/api/products')
-def get_products():
-    """获取产品列表"""
-    # 通过应用实例获取客户端
-    app = get_app()
-    redis_client = app.get_client('redis_client')
-    if redis_client:
-        cache_data = redis_client.get('products')
-    return {"products": []}
+    return redis_client.get('products')
 ```
 
 #### 完整示例
 
 ```python
-from myboot.core.decorators import service, client, get, post
-from myboot.core.application import get_service, get_client
+from myboot.core.decorators import service, client, rest_controller, get, post
 
 # 定义服务
 @service()
@@ -275,42 +292,48 @@ class UserService:
     def get_user(self, user_id: int):
         return {"id": user_id, "name": f"用户{user_id}"}
 
+    def create_user(self, name: str, email: str):
+        return {"name": name, "email": email}
+
+@service()
+class EmailService:
+    """邮件服务"""
+    def send_email(self, to: str, subject: str, body: str):
+        print(f"发送邮件到 {to}")
+
 # 定义客户端
 @client('redis_client')
 class RedisClient:
     """Redis 客户端 - 注册为 'redis_client'"""
     def get(self, key: str):
-        return None  # 示例实现
+        return None
 
-# 在路由中使用
-@get('/users/{user_id}')
-def get_user(user_id: int):
-    """获取用户"""
-    # 获取服务
-    user_service = get_service('user_service')
-    user = user_service.get_user(user_id)
+# 控制器中使用依赖注入
+@rest_controller('/api/users')
+class UserController:
+    """用户控制器 - 自动注入服务和客户端"""
 
-    # 获取客户端
-    redis_client = get_client('redis_client')
-    if redis_client:
+    def __init__(self, user_service: UserService, email_service: EmailService, redis_client: RedisClient):
+        self.user_service = user_service
+        self.email_service = email_service
+        self.redis_client = redis_client
+
+    @get('/{user_id}')
+    def get_user(self, user_id: int):
+        """获取用户"""
+        # 先检查缓存
         cache_key = f"user:{user_id}"
-        cached = redis_client.get(cache_key)
+        cached = self.redis_client.get(cache_key)
         if cached:
             return cached
+        return self.user_service.get_user(user_id)
 
-    return user
-
-@post('/users')
-def create_user(name: str, email: str):
-    """创建用户"""
-    # 可以同时获取多个服务
-    user_service = get_service('user_service')
-    email_service = get_service('email_service')
-
-    user = user_service.create_user(name, email)
-    email_service.send_email(email, "欢迎", f"欢迎 {name}")
-
-    return {"message": "用户创建成功", "user": user}
+    @post('/')
+    def create_user(self, name: str, email: str):
+        """创建用户"""
+        user = self.user_service.create_user(name, email)
+        self.email_service.send_email(email, "欢迎", f"欢迎 {name}")
+        return {"message": "用户创建成功", "user": user}
 ```
 
 #### 服务命名规则
@@ -326,16 +349,16 @@ def create_user(name: str, email: str):
 
 #### 注意事项
 
-1. **服务必须已注册**: 在使用 `get_service()` 或 `get_client()` 之前，确保服务或客户端已经通过装饰器注册
-2. **返回 None**: 如果服务或客户端不存在，函数会返回 `None`，使用前建议检查
-3. **应用上下文**: 使用全局函数时，确保应用已经创建并初始化
-4. **推荐使用全局函数**: 在路由处理函数中，推荐使用 `get_service()` 和 `get_client()` 全局函数，代码更简洁
+1. **推荐依赖注入**: 在控制器中推荐使用构造函数依赖注入，代码更清晰、可测试性更好
+2. **服务必须已注册**: 确保服务或客户端已经通过装饰器注册
+3. **全局函数适用场景**: `get_service()` 和 `get_client()` 适用于启动钩子、工具函数等非控制器场景
+4. **路由定义**: 所有路由必须在 `@rest_controller` 装饰的类中定义
 
 ### 约定规则
 
 - **服务命名**: 类名自动转换为下划线分隔的小写形式作为服务名（如 `UserService` → `user_service`）
-- **路由映射**: 函数名自动生成 RESTful 路径
-- **任务调度**: 装饰器自动注册到调度器
+- **路由映射**: 使用 `@rest_controller` 装饰器定义路由，方法装饰器 `@get`、`@post` 等定义具体端点
+- **任务调度**: 在 `@component` 类中使用 `@cron`、`@interval`、`@once` 装饰器
 - **组件扫描**: 自动扫描指定包中的所有组件
 
 ## ⚡ 高性能服务器
@@ -473,124 +496,83 @@ export LOGGING__LEVEL=DEBUG
 
 ### 1. Web API 开发
 
-#### 基础路由
+**重要**：路由必须在 `@rest_controller` 装饰的类中定义，支持依赖注入。
+
+#### REST 控制器（推荐方式）
 
 ```python
-from myboot.core.decorators import get, post, put, delete
+from myboot.core.decorators import rest_controller, get, post, put, delete, service
 from myboot.web.models import BaseResponse
 
 
-@get("/users")
-def get_users():
-    """获取用户列表 - 自动注册为 GET /users"""
-    # 约定优于配置：可以通过 get_service() 获取服务实例
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-    # 使用服务获取用户列表
-    users = user_service.get_users() if user_service else []
-    return BaseResponse(
-        success=True,
-        message="获取用户列表成功",
-        data={"users": users}
-    )
+@service()
+class UserService:
+    """用户服务"""
+    def get_users(self):
+        return []
+
+    def get_user(self, user_id: int):
+        return {"user_id": user_id, "name": f"用户{user_id}"}
+
+    def create_user(self, name: str, email: str):
+        return {"name": name, "email": email}
+
+    def update_user(self, user_id: int, **kwargs):
+        return {"user_id": user_id, **kwargs}
+
+    def delete_user(self, user_id: int):
+        return {"user_id": user_id}
 
 
-@post("/users")
-def create_user(name: str, email: str):
-    """创建用户 - 自动注册为 POST /users"""
-    # 约定优于配置：服务自动注册，可以通过 get_service() 获取
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-    if user_service:
-        user = user_service.create_user(name, email)
-        return BaseResponse(
-            success=True,
-            message="用户创建成功",
-            data=user
-        )
-    return BaseResponse(
-        success=True,
-        message="用户创建成功",
-        data={"name": name, "email": email}
-    )
+@rest_controller('/api/users')
+class UserController:
+    """用户控制器 - 自动注入 UserService"""
 
+    def __init__(self, user_service: UserService):
+        self.user_service = user_service
 
-@get("/users/{user_id}")
-def get_user(user_id: int):
-    """获取单个用户 - 自动注册为 GET /users/{user_id}"""
-    # 约定优于配置：服务自动注册，可以通过 get_service() 获取
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-    if user_service:
-        user = user_service.get_user(user_id)
-        return BaseResponse(
-            success=True,
-            message="获取用户成功",
-            data=user
-        )
-    return BaseResponse(
-        success=True,
-        message="获取用户成功",
-        data={"user_id": user_id, "name": f"用户{user_id}", "email": f"user{user_id}@example.com"}
-    )
+    @get('/')
+    def get_users(self):
+        """获取用户列表 - GET /api/users"""
+        users = self.user_service.get_users()
+        return BaseResponse(success=True, message="获取用户列表成功", data={"users": users})
 
+    @get('/{user_id}')
+    def get_user(self, user_id: int):
+        """获取单个用户 - GET /api/users/{user_id}"""
+        user = self.user_service.get_user(user_id)
+        return BaseResponse(success=True, message="获取用户成功", data=user)
 
-@put("/users/{user_id}")
-def update_user(user_id: int, name: str = None, email: str = None):
-    """更新用户 - 自动注册为 PUT /users/{user_id}"""
-    # 约定优于配置：服务自动注册，可以通过 get_service() 获取
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-    if user_service:
+    @post('/')
+    def create_user(self, name: str, email: str):
+        """创建用户 - POST /api/users"""
+        user = self.user_service.create_user(name, email)
+        return BaseResponse(success=True, message="用户创建成功", data=user)
+
+    @put('/{user_id}')
+    def update_user(self, user_id: int, name: str = None, email: str = None):
+        """更新用户 - PUT /api/users/{user_id}"""
         update_data = {}
         if name:
             update_data['name'] = name
         if email:
             update_data['email'] = email
-        user = user_service.update_user(user_id, **update_data)
-        if user:
-            return BaseResponse(
-                success=True,
-                message=f"用户 {user_id} 更新成功",
-                data=user
-            )
-    return BaseResponse(
-        success=True,
-        message=f"用户 {user_id} 更新成功",
-        data={"user_id": user_id, "name": name, "email": email}
-    )
+        user = self.user_service.update_user(user_id, **update_data)
+        return BaseResponse(success=True, message=f"用户 {user_id} 更新成功", data=user)
 
-
-@delete("/users/{user_id}")
-def delete_user(user_id: int):
-    """删除用户 - 自动注册为 DELETE /users/{user_id}"""
-    # 约定优于配置：服务自动注册，可以通过 get_service() 获取
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-    if user_service:
-        user = user_service.delete_user(user_id)
-        if user:
-            return BaseResponse(
-                success=True,
-                message=f"用户 {user_id} 删除成功",
-                data=user
-            )
-    return BaseResponse(
-        success=True,
-        message=f"用户 {user_id} 删除成功",
-        data={"user_id": user_id}
-    )
+    @delete('/{user_id}')
+    def delete_user(self, user_id: int):
+        """删除用户 - DELETE /api/users/{user_id}"""
+        user = self.user_service.delete_user(user_id)
+        return BaseResponse(success=True, message=f"用户 {user_id} 删除成功", data=user)
 
 
 # 约定优于配置说明：
-# 1. 使用 @get, @post, @put, @delete 装饰器自动注册路由
-# 2. 函数名和路径自动映射
-# 3. 框架自动发现和注册这些路由
-# 4. 支持依赖注入，通过 get_service() 和 get_client() 获取服务和客户端
+# 1. 使用 @rest_controller 装饰器定义控制器类和基础路径
+# 2. 使用 @get, @post, @put, @delete 装饰器定义路由方法
+# 3. 构造函数参数自动进行依赖注入
+# 4. 框架自动发现和注册控制器
 # 5. 统一的响应格式和错误处理
-# 6. 无需手动在 main.py 中注册路由
-
-# 更多关于依赖注入的说明，请参考"依赖注入和服务管理"章节
 ```
 
 #### REST 控制器
@@ -683,42 +665,45 @@ class ReportController:
         return {"status": "ok"}
 ```
 
-**在控制器中使用服务：**
+**在控制器中使用依赖注入：**
 
 ```python
-from myboot.core.decorators import rest_controller, get, post
-from myboot.core.application import get_service, get_client
+from myboot.core.decorators import rest_controller, get, post, service, client
+from myboot.web.models import BaseResponse
+
+@service()
+class ProductService:
+    def get_all(self):
+        return []
+    def create(self, name: str, price: float):
+        return {"name": name, "price": price}
+
+@client()
+class RedisClient:
+    def set(self, key: str, value):
+        pass
 
 @rest_controller('/api/products')
 class ProductController:
-    """产品控制器"""
+    """产品控制器 - 使用依赖注入"""
 
-    def __init__(self):
-        # 在初始化时获取服务
-        self.product_service = get_service('product_service')
-        self.cache_client = get_client('redis_client')
+    def __init__(self, product_service: ProductService, redis_client: RedisClient):
+        # 通过构造函数自动注入
+        self.product_service = product_service
+        self.redis_client = redis_client
 
     @get('/')
     def list_products(self):
         """获取产品列表"""
-        # 使用服务
-        if self.product_service:
-            products = self.product_service.get_all()
-            return BaseResponse(success=True, data={"products": products})
-        return BaseResponse(success=True, data={"products": []})
+        products = self.product_service.get_all()
+        return BaseResponse(success=True, data={"products": products})
 
     @post('/')
     def create_product(self, name: str, price: float):
         """创建产品"""
-        # 在方法中也可以动态获取服务
-        product_service = get_service('product_service')
-        if product_service:
-            product = product_service.create(name, price)
-            # 使用客户端缓存
-            if self.cache_client:
-                self.cache_client.set(f"product:{product.id}", product)
-            return BaseResponse(success=True, data={"product": product})
-        return BaseResponse(success=False, message="服务不可用")
+        product = self.product_service.create(name, price)
+        self.redis_client.set(f"product:{product['name']}", product)
+        return BaseResponse(success=True, data={"product": product})
 ```
 
 **注意事项：**
@@ -726,13 +711,15 @@ class ProductController:
 1. **显式装饰器**：类中的方法必须显式使用 `@get`、`@post` 等装饰器才会生成路由
 2. **路径合并**：方法路径会自动与基础路径合并，形成最终的路由路径
 3. **自动注册**：控制器类会被自动发现和注册，无需手动配置
-4. **服务注入**：可以在 `__init__` 方法中初始化服务，或在方法中动态获取
+4. **依赖注入**：在构造函数中声明类型注解，框架自动注入服务和客户端
 
 #### 数据模型
 
 ```python
 from pydantic import BaseModel
 from typing import Optional
+from myboot.core.decorators import rest_controller, post
+from myboot.web.models import BaseResponse
 
 class User(BaseModel):
     """用户数据模型"""
@@ -741,48 +728,32 @@ class User(BaseModel):
     email: str
     age: Optional[int] = None
 
-from myboot.core.decorators import post
-from myboot.web.models import BaseResponse
-
-@post("/users")
-def create_user(user: User):
-    """创建用户"""
-    return BaseResponse(
-        success=True,
-        message="用户创建成功",
-        data=user.dict()
-    )
+@rest_controller('/api/users')
+class UserController:
+    @post('/')
+    def create_user(self, user: User):
+        """创建用户"""
+        return BaseResponse(success=True, message="用户创建成功", data=user.dict())
 ```
 
 #### 分页处理
 
 ```python
-from myboot.core.decorators import get
+from myboot.core.decorators import rest_controller, get
 from myboot.web.models import BaseResponse
 from typing import Optional
 
-@get("/users")
-def get_users(
-    page: int = 1,
-    size: int = 10,
-    search: Optional[str] = None
-):
-    """获取用户列表（分页）"""
-    # 处理分页逻辑
-    # users = get_users_from_db(page, size, search)
-    # total_count = get_total_count(search)
-
-    # 示例返回
-    return BaseResponse(
-        success=True,
-        message="获取用户列表成功",
-        data={
-            "users": [],
-            "total": 0,
-            "page": page,
-            "size": size
-        }
-    )
+@rest_controller('/api/users')
+class UserController:
+    @get('/')
+    def get_users(self, page: int = 1, size: int = 10, search: Optional[str] = None):
+        """获取用户列表（分页） - GET /api/users"""
+        # 处理分页逻辑
+        return BaseResponse(
+            success=True,
+            message="获取用户列表成功",
+            data={"users": [], "total": 0, "page": page, "size": size}
+        )
 ```
 
 ### 2. 定时任务
@@ -798,11 +769,11 @@ from myboot.core.config import get_config
 @component()
 class ScheduledJobs:
     """定时任务组件"""
-    
+
     @cron("0 0 * * * *", enabled=True)  # 每小时执行
     def hourly_task(self):
         print("每小时任务")
-    
+
     # 从配置文件读取 enabled 状态
     @cron("0 0 2 * * *", enabled=get_config('jobs.cleanup_task.enabled', True))
     def daily_backup(self):
@@ -816,11 +787,11 @@ class ScheduledJobs:
 @component()
 class MonitorJobs:
     """监控任务组件"""
-    
+
     @interval(seconds=30, enabled=True)  # 每30秒执行
     def heartbeat(self):
         print("心跳检测")
-    
+
     @interval(minutes=5, enabled=get_config('jobs.monitor.enabled', True))
     def monitor(self):
         """每5分钟执行"""
@@ -833,7 +804,7 @@ class MonitorJobs:
 @component()
 class OneTimeJobs:
     """一次性任务组件"""
-    
+
     @once("2025-12-31 23:59:59", enabled=True)
     def new_year_task(self):
         """新年任务 - 过期后不再执行"""
@@ -853,10 +824,10 @@ class DataService:
 @component()
 class DataSyncJobs:
     """数据同步任务 - 自动注入 DataService"""
-    
+
     def __init__(self, data_service: DataService):
         self.data_service = data_service
-    
+
     @cron("0 2 * * *")  # 每天凌晨2点
     def sync_daily(self):
         self.data_service.sync_data()
@@ -966,7 +937,7 @@ from myboot.core.config import get_config
 @component()
 class TaskControlDemo:
     """任务控制示例"""
-    
+
     # 方式一：直接指定
     @cron("0 */1 * * * *", enabled=True)  # 启用
     def enabled_task(self):

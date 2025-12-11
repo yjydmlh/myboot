@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from myboot.core.application import Application
-from myboot.core.decorators import service, get, post
+from myboot.core.decorators import service, rest_controller, get, post
 
 # 添加项目根目录到 Python 路径
 project_root = Path(__file__).parent.parent
@@ -36,6 +36,7 @@ class DatabaseClient:
         print("✅ DatabaseClient 已初始化")
     
     def query(self, sql: str):
+        print(f"📊 执行查询: {sql}")
         return [{"id": 1, "name": "用户1"}]
 
 
@@ -111,7 +112,7 @@ class EmailService:
         print("✅ EmailService 已初始化")
     
     def send_email(self, to: str, subject: str, body: str):
-        print(f"📧 发送邮件到 {to}: {subject}")
+        print(f"📧 发送邮件到 {to}: {subject} - {body}")
         return {"status": "sent", "to": to, "subject": subject}
 
 
@@ -143,44 +144,56 @@ class OrderService:
         }
 
 
-# ==================== 路由层 ====================
+# ==================== REST 控制器 ====================
+# 注意：路由必须在 @rest_controller 装饰的类中定义，支持依赖注入
 
-@get('/users/{user_id}')
-def get_user_di(user_id: int):
-    """获取用户信息（依赖注入示例）"""
-    from myboot.core.application import get_service
-    user_service = get_service('user_service')
-    if user_service:
-        return user_service.get_user(user_id)
-    return {"error": "服务不可用"}
+@rest_controller('/')
+class HomeController:
+    """首页控制器"""
+    
+    @get('/')
+    def home(self):
+        """首页（依赖注入示例）"""
+        return {
+            "message": "依赖注入示例应用",
+            "features": [
+                "自动依赖注入",
+                "多级依赖支持",
+                "可选依赖支持",
+                "循环依赖检测",
+                "REST 控制器"
+            ],
+            "endpoints": [
+                "GET /api/users/{user_id} - 获取用户信息",
+                "POST /api/orders - 创建订单"
+            ]
+        }
 
 
-@post('/orders')
-def create_order_di(user_id: int, product: str):
-    """创建订单（依赖注入示例）"""
-    from myboot.core.application import get_service
-    order_service = get_service('order_service')
-    if order_service:
-        return order_service.create_order(user_id, product)
-    return {"error": "服务不可用"}
+@rest_controller('/api/users')
+class UserController:
+    """用户控制器 - 自动注入 UserService"""
+    
+    def __init__(self, user_service: UserService):
+        self.user_service = user_service
+    
+    @get('/{user_id}')
+    def get_user(self, user_id: int):
+        """获取用户信息 - GET /api/users/{user_id}"""
+        return self.user_service.get_user(user_id)
 
 
-@get('/')
-def home_di():
-    """首页（依赖注入示例）"""
-    return {
-        "message": "依赖注入示例应用",
-        "features": [
-            "自动依赖注入",
-            "多级依赖支持",
-            "可选依赖支持",
-            "循环依赖检测"
-        ],
-        "endpoints": [
-            "GET /users/{user_id} - 获取用户信息",
-            "POST /orders - 创建订单"
-        ]
-    }
+@rest_controller('/api/orders')
+class OrderController:
+    """订单控制器 - 自动注入 OrderService"""
+    
+    def __init__(self, order_service: OrderService):
+        self.order_service = order_service
+    
+    @post('/')
+    def create_order(self, user_id: int, product: str):
+        """创建订单 - POST /api/orders"""
+        return self.order_service.create_order(user_id, product)
 
 
 if __name__ == "__main__":

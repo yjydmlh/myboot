@@ -5,6 +5,7 @@ MyBoot 应用程序主类
 """
 
 import asyncio
+import os
 import signal
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, List, Optional, Type
@@ -66,7 +67,16 @@ class Application:
         setup_logging(self.config)
 
         self.logger = logger.bind(name=self.name)
-        self.scheduler = Scheduler(config=self.config)
+        
+        # Worker 信息（多进程模式下由环境变量设置）
+        self._worker_id = int(os.environ.get("MYBOOT_WORKER_ID", "1"))
+        self._worker_count = int(os.environ.get("MYBOOT_WORKER_COUNT", "1"))
+        self._is_primary_worker = os.environ.get("MYBOOT_IS_PRIMARY_WORKER", "1") == "1"
+        
+        # Scheduler 默认只在 primary worker 启动（可通过配置覆盖）
+        scheduler_on_all_workers = self.config.get("scheduler.on_all_workers", False)
+        self._scheduler_enabled = self._is_primary_worker or scheduler_on_all_workers
+        self.scheduler = Scheduler(config=self.config, enabled=self._scheduler_enabled)
 
         # 中间件列表
         self.middlewares: List[Middleware] = []
@@ -428,6 +438,7 @@ class Application:
             port: int = 8000,
             reload: bool = False,
             workers: int = 1,
+            app_path: Optional[str] = None,
             **kwargs
     ) -> None:
         """
@@ -438,13 +449,29 @@ class Application:
             port: 端口号
             reload: 是否开启热重载
             workers: 工作进程数
+            app_path: 应用模块路径（多 workers 模式必需），格式为 "module.path:app_name"
+                      例如: "main:app" 表示从 main.py 导入 app 变量
+                      如果 app 是通过 get_fastapi_app() 获取，使用 "main:app.get_fastapi_app()"
             **kwargs: 其他服务器参数
+            
+        Example:
+            # 单进程模式（默认）
+            app.run(host="0.0.0.0", port=8000)
+            
+            # 多进程模式（4个 workers）
+            app.run(
+                host="0.0.0.0",
+                port=8000,
+                workers=4,
+                app_path="main:app.get_fastapi_app()"
+            )
         """
         # 从配置中获取参数
         host = self.config.get("server.host", host)
         port = self.config.get("server.port", port)
         reload = self.config.get("server.reload", reload)
         workers = self.config.get("server.workers", workers)
+        app_path = self.config.get("server.app_path", app_path)
 
         # 自动发现和配置
         if self.auto_configuration_enabled:
@@ -461,6 +488,12 @@ class Application:
         self.logger.info(f"🔍 健康检查: http://{display_host}:{port}/health")
         self.logger.info(f"⚙️ 服务器类型: Hypercorn")
         self.logger.info(f"🔧 工作进程: {workers}")
+        
+        if workers > 1 and not app_path:
+            self.logger.warning(
+                "⚠️ 多 workers 模式需要提供 app_path 参数，"
+                "例如: app.run(workers=4, app_path='main:app.get_fastapi_app()')"
+            )
 
         # 启动服务器
         try:
@@ -470,6 +503,7 @@ class Application:
                 port=port,
                 reload=reload,
                 workers=workers,
+                app_path=app_path,
                 **kwargs
             )
         except KeyboardInterrupt:
@@ -505,6 +539,45 @@ class Application:
         if self._fastapi_app is None:
             self._fastapi_app = self._create_fastapi_app()
         return self._fastapi_app
+
+    # ==================== Worker 信息 ====================
+    
+    @property
+    def worker_id(self) -> int:
+        """
+        获取当前 Worker ID（从 1 开始）
+        
+        单进程模式下返回 1
+        """
+        return self._worker_id
+    
+    @property
+    def worker_count(self) -> int:
+        """
+        获取 Worker 总数
+        
+        单进程模式下返回 1
+        """
+        return self._worker_count
+    
+    @property
+    def is_primary_worker(self) -> bool:
+        """
+        是否为主 Worker（Worker ID = 1）
+        
+        适用于只需要在一个 worker 执行的任务（如定时任务、初始化任务）
+        
+        Example:
+            if app.is_primary_worker:
+                # 只在主 worker 执行
+                await init_cache()
+        """
+        return self._is_primary_worker
+    
+    @property
+    def is_multi_worker_mode(self) -> bool:
+        """是否运行在多 Worker 模式"""
+        return self._worker_count > 1
 
 
 # 便捷函数

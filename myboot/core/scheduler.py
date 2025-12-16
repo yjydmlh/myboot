@@ -25,12 +25,14 @@ if TYPE_CHECKING:
 class Scheduler:
     """应用任务调度器（基于 APScheduler）"""
     
-    def __init__(self, config: Optional[Union[str, Dynaconf]] = None):
+    def __init__(self, config: Optional[Union[str, Dynaconf]] = None, enabled: Optional[bool] = None):
         """
         初始化调度器
         
         Args:
             config: 配置文件路径或配置对象（Dynaconf），如果为 None 则使用默认配置
+            enabled: 是否启用调度器，如果为 None 则从配置文件读取
+                     多 workers 模式下，默认只在 primary worker 启用
         """
         self._logger = logger.bind(name="scheduler")
         self._scheduled_jobs = {}  # 存储 ScheduledJob 对象
@@ -43,8 +45,9 @@ class Scheduler:
             # 如果传入的是配置文件路径或 None，则获取配置对象
             self._config = get_settings(config)
         
-        # 从配置对象读取调度器配置
-        self._enabled = self._config.get('scheduler.enabled', True)
+        # 从配置对象读取调度器配置，enabled 参数可覆盖配置
+        config_enabled = self._config.get('scheduler.enabled', True)
+        self._enabled = enabled if enabled is not None else config_enabled
         timezone_str = self._config.get('scheduler.timezone', 'UTC')
         self._timezone = self._parse_timezone(timezone_str)
         max_workers = self._config.get('scheduler.max_workers', 10)

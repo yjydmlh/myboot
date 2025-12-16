@@ -1,21 +1,106 @@
 """
 服务器管理器
 
-默认使用 Hypercorn 作为 ASGI 服务器
+默认使用 Hypercorn 作为 ASGI 服务器，支持多 workers 模式
 """
 
 import asyncio
+import multiprocessing
+import os
 import signal
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
 from ..utils import get_local_ip
 
 
+def _resolve_app_from_path(app_path: str):
+    """
+    从模块路径解析 ASGI 应用
+    
+    支持的格式:
+        - "module.path:app"                    -> 获取 module.path 模块的 app 属性
+        - "module.path:app.get_fastapi_app()"  -> 获取 app 对象后调用 get_fastapi_app()
+        - "module.path:create_app()"           -> 调用 module.path 模块的 create_app() 函数
+    
+    Args:
+        app_path: 应用模块路径
+        
+    Returns:
+        ASGI 应用实例
+    """
+    import importlib
+    import re
+    
+    # 解析模块路径和应用名
+    if ":" in app_path:
+        module_path, app_expr = app_path.rsplit(":", 1)
+    else:
+        module_path, app_expr = app_path, "app"
+    
+    # 导入模块
+    module = importlib.import_module(module_path)
+    
+    # 解析表达式，支持链式调用如 "app.get_fastapi_app()"
+    # 使用简单的解析器处理 attr 和 method() 调用
+    parts = re.split(r'\.(?![^(]*\))', app_expr)  # 按 . 分割，但不分割括号内的点
+    
+    result = module
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+            
+        # 检查是否是方法调用 (以 () 结尾)
+        if part.endswith("()"):
+            method_name = part[:-2]
+            result = getattr(result, method_name)()
+        else:
+            result = getattr(result, part)
+    
+    return result
+
+
+def _worker_serve(app_path: str, config_dict: dict, worker_id: int, total_workers: int):
+    """
+    Worker 进程入口函数
+    
+    Args:
+        app_path: 应用模块路径，格式为 "module.path:app_name"
+        config_dict: Hypercorn 配置字典
+        worker_id: Worker 进程 ID (从 1 开始)
+        total_workers: 总 worker 数量
+    """
+    # 设置环境变量，供 Application 读取
+    os.environ["MYBOOT_WORKER_ID"] = str(worker_id)
+    os.environ["MYBOOT_WORKER_COUNT"] = str(total_workers)
+    os.environ["MYBOOT_IS_PRIMARY_WORKER"] = "1" if worker_id == 1 else "0"
+    
+    try:
+        import hypercorn.asyncio
+        from hypercorn.config import Config
+    except ImportError:
+        raise ImportError("Hypercorn 未安装，请运行: pip install hypercorn")
+    
+    # 从模块路径加载 app
+    app = _resolve_app_from_path(app_path)
+    
+    # 重建配置
+    config = Config()
+    for key, value in config_dict.items():
+        if hasattr(config, key):
+            setattr(config, key, value)
+    
+    logger.info(f"Worker-{worker_id}/{total_workers} 启动中... (primary={worker_id == 1})")
+    
+    # 运行服务器
+    asyncio.run(hypercorn.asyncio.serve(app, config))
+
+
 class HypercornServer:
-    """Hypercorn 服务器"""
+    """Hypercorn 服务器，支持多 workers 模式"""
     
     def __init__(self, app, host: str = "0.0.0.0", port: int = 8000, **kwargs):
         self.app = app
@@ -23,6 +108,7 @@ class HypercornServer:
         self.port = port
         self.kwargs = kwargs
         self._running = False
+        self._workers: List[multiprocessing.Process] = []
         self._import_hypercorn()
     
     def _import_hypercorn(self):
@@ -31,38 +117,120 @@ class HypercornServer:
             import hypercorn.asyncio
             from hypercorn.config import Config
             self.hypercorn = hypercorn
-            self.Config = Config
+            self._config_class = Config
         except ImportError:
             raise ImportError("Hypercorn 未安装，请运行: pip install hypercorn")
     
-    def start(self) -> None:
-        """启动 Hypercorn 服务器"""
+    def _build_config(self) -> Any:
+        """构建 Hypercorn 配置"""
+        config = self._config_class()
+        config.bind = [f"{self.host}:{self.port}"]
+        config.use_reloader = self.kwargs.get('reload', False)
+        config.workers = self.kwargs.get('workers', 1)
+        config.keep_alive_timeout = self.kwargs.get('keep_alive_timeout', 5)
+        config.graceful_timeout = self.kwargs.get('graceful_timeout', 30)
+        config.max_incomplete_request_size = self.kwargs.get('max_incomplete_request_size', 16 * 1024)
+        config.websocket_max_size = self.kwargs.get('websocket_max_size', 16 * 1024 * 1024)
+        
+        # 应用其他配置
+        for key, value in self.kwargs.items():
+            if hasattr(config, key) and key not in ['reload', 'workers']:
+                setattr(config, key, value)
+        
+        return config
+    
+    def _config_to_dict(self, config) -> dict:
+        """将配置转换为可序列化的字典"""
+        return {
+            'bind': config.bind,
+            'use_reloader': config.use_reloader,
+            'keep_alive_timeout': config.keep_alive_timeout,
+            'graceful_timeout': config.graceful_timeout,
+            'max_incomplete_request_size': getattr(config, 'max_incomplete_request_size', 16 * 1024),
+            'websocket_max_size': getattr(config, 'websocket_max_size', 16 * 1024 * 1024),
+        }
+    
+    def start(self, app_path: Optional[str] = None) -> None:
+        """
+        启动 Hypercorn 服务器
+        
+        Args:
+            app_path: 应用模块路径（多 workers 模式必需），格式为 "module.path:app_name"
+                      例如: "myapp.main:app" 或 "myapp.main:create_app()"
+        """
         try:
-            # 配置 Hypercorn
-            config = self.Config()
-            config.bind = [f"{self.host}:{self.port}"]
-            config.use_reloader = self.kwargs.get('reload', False)
-            config.workers = self.kwargs.get('workers', 1)
-            config.keep_alive_timeout = self.kwargs.get('keep_alive_timeout', 5)
-            config.graceful_timeout = self.kwargs.get('graceful_timeout', 30)
-            config.max_incomplete_request_size = self.kwargs.get('max_incomplete_request_size', 16 * 1024)
-            config.websocket_max_size = self.kwargs.get('websocket_max_size', 16 * 1024 * 1024)
-            
-            # 应用其他配置
-            for key, value in self.kwargs.items():
-                if hasattr(config, key) and key not in ['reload']:
-                    setattr(config, key, value)
+            config = self._build_config()
+            workers = self.kwargs.get('workers', 1)
             
             self._running = True
             
-            # 运行服务器
-            asyncio.run(self.hypercorn.asyncio.serve(self.app, config))
+            if workers > 1:
+                # 多 workers 模式
+                if not app_path:
+                    logger.warning(
+                        "多 workers 模式需要提供 app_path 参数（如 'myapp.main:app'），"
+                        "当前回退到单进程模式"
+                    )
+                    asyncio.run(self.hypercorn.asyncio.serve(self.app, config))
+                else:
+                    self._start_multiple_workers(app_path, config, workers)
+            else:
+                # 单 worker 模式：直接运行
+                asyncio.run(self.hypercorn.asyncio.serve(self.app, config))
             
         except Exception as e:
             logger.error(f"Hypercorn 服务器启动失败: {e}")
             raise
         finally:
             self._running = False
+            self._cleanup_workers()
+    
+    def _start_multiple_workers(self, app_path: str, config, workers: int) -> None:
+        """
+        启动多个 worker 进程
+        
+        Args:
+            app_path: 应用模块路径
+            config: Hypercorn 配置
+            workers: worker 数量
+        """
+        # Windows 需要使用 spawn
+        if sys.platform == 'win32':
+            multiprocessing.set_start_method('spawn', force=True)
+        
+        config_dict = self._config_to_dict(config)
+        
+        logger.info(f"启动 {workers} 个 worker 进程...")
+        
+        # 创建并启动 worker 进程
+        for i in range(workers):
+            process = multiprocessing.Process(
+                target=_worker_serve,
+                args=(app_path, config_dict, i + 1, workers),
+                name=f"hypercorn-worker-{i + 1}"
+            )
+            process.start()
+            self._workers.append(process)
+            logger.info(f"Worker-{i + 1}/{workers} 已启动 (PID: {process.pid})")
+        
+        # 主进程等待所有 worker
+        try:
+            for process in self._workers:
+                process.join()
+        except KeyboardInterrupt:
+            logger.info("收到中断信号，正在关闭所有 workers...")
+            self._cleanup_workers()
+    
+    def _cleanup_workers(self) -> None:
+        """清理所有 worker 进程"""
+        for process in self._workers:
+            if process.is_alive():
+                logger.info(f"终止 Worker (PID: {process.pid})...")
+                process.terminate()
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+        self._workers.clear()
     
     def stop(self) -> None:
         """停止 Hypercorn 服务器"""
@@ -91,6 +259,7 @@ class ServerManager:
         app,
         host: str = "0.0.0.0",
         port: int = 8000,
+        app_path: Optional[str] = None,
         **kwargs
     ) -> None:
         """
@@ -100,7 +269,13 @@ class ServerManager:
             app: ASGI 应用
             host: 主机地址
             port: 端口号
-            **kwargs: 其他配置参数
+            app_path: 应用模块路径（多 workers 模式必需），格式为 "module.path:app_name"
+                      例如: "myapp.main:app"
+            **kwargs: 其他配置参数，包括:
+                - workers: worker 进程数量，默认 1
+                - reload: 是否启用热重载
+                - keep_alive_timeout: keep-alive 超时时间
+                - graceful_timeout: 优雅关闭超时时间
         """
         if self._current_server and self._current_server.is_running:
             logger.warning("服务器已在运行中，请先停止当前服务器")
@@ -112,7 +287,7 @@ class ServerManager:
         self._register_signal_handlers()
         
         try:
-            self._current_server.start()
+            self._current_server.start(app_path=app_path)
         except KeyboardInterrupt:
             logger.info("收到中断信号，正在关闭服务器...")
         finally:
@@ -155,7 +330,30 @@ def start_server(
     app,
     host: str = "0.0.0.0",
     port: int = 8000,
+    app_path: Optional[str] = None,
     **kwargs
 ) -> None:
-    """启动服务器的便捷函数"""
-    server_manager.start_server(app, host, port, **kwargs)
+    """
+    启动服务器的便捷函数
+    
+    Args:
+        app: ASGI 应用
+        host: 主机地址
+        port: 端口号
+        app_path: 应用模块路径（多 workers 模式必需），格式为 "module.path:app_name"
+        **kwargs: 其他配置参数
+    
+    Example:
+        # 单 worker 模式
+        start_server(app, host="0.0.0.0", port=8000)
+        
+        # 多 workers 模式（4个进程）
+        start_server(
+            app, 
+            host="0.0.0.0", 
+            port=8000,
+            app_path="myapp.main:app",
+            workers=4
+        )
+    """
+    server_manager.start_server(app, host, port, app_path=app_path, **kwargs)

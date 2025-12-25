@@ -8,12 +8,38 @@ import asyncio
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
 from ..utils import get_local_ip
+
+
+def _create_socket_with_reuseport(host: str, port: int) -> socket.socket:
+    """
+    创建启用 SO_REUSEPORT 的 socket（仅 Linux/macOS）
+    
+    Args:
+        host: 绑定的主机地址
+        port: 绑定的端口号
+        
+    Returns:
+        已绑定并监听的 socket 对象
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    # Linux/macOS 支持 SO_REUSEPORT
+    if hasattr(socket, 'SO_REUSEPORT'):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    
+    sock.setblocking(False)
+    sock.bind((host, port))
+    sock.listen(100)  # backlog
+    
+    return sock
 
 
 def _resolve_app_from_path(app_path: str):
@@ -67,7 +93,13 @@ def _resolve_app_from_path(app_path: str):
     return result
 
 
-def _worker_serve(app_path: str, config_dict: dict, worker_id: int, total_workers: int):
+def _worker_serve(
+    app_path: str, 
+    config_dict: dict, 
+    worker_id: int, 
+    total_workers: int,
+    socket_fd: Optional[int] = None
+):
     """
     Worker 进程入口函数
     
@@ -76,6 +108,7 @@ def _worker_serve(app_path: str, config_dict: dict, worker_id: int, total_worker
         config_dict: Hypercorn 配置字典
         worker_id: Worker 进程 ID (从 1 开始)
         total_workers: 总 worker 数量
+        socket_fd: 预创建的 socket 文件描述符（Linux/macOS 多 worker 模式）
     """
     # 设置环境变量，供 Application 读取
     os.environ["MYBOOT_WORKER_ID"] = str(worker_id)
@@ -100,6 +133,10 @@ def _worker_serve(app_path: str, config_dict: dict, worker_id: int, total_worker
     for key, value in config_dict.items():
         if hasattr(config, key):
             setattr(config, key, value)
+    
+    # 如果提供了 socket_fd，使用 fd:// 绑定方式
+    if socket_fd is not None:
+        config.bind = [f"fd://{socket_fd}"]
     
     logger.info(f"Worker-{worker_id}/{total_workers} 启动中... (primary={worker_id == 1})")
     
@@ -207,6 +244,19 @@ class HypercornServer:
             multiprocessing.set_start_method('spawn', force=True)
         
         config_dict = self._config_to_dict(config)
+        socket_fd: Optional[int] = None
+        shared_socket: Optional[socket.socket] = None
+        
+        # Linux/macOS: 使用 SO_REUSEPORT 预创建 socket，允许多个进程绑定同一端口
+        if sys.platform != 'win32':
+            try:
+                shared_socket = _create_socket_with_reuseport(self.host, self.port)
+                socket_fd = shared_socket.fileno()
+                logger.info(f"已创建共享 socket (fd={socket_fd}), 启用 SO_REUSEPORT")
+            except Exception as e:
+                logger.warning(f"创建共享 socket 失败: {e}，回退到普通模式")
+                shared_socket = None
+                socket_fd = None
         
         logger.info(f"启动 {workers} 个 worker 进程...")
         
@@ -214,7 +264,7 @@ class HypercornServer:
         for i in range(workers):
             process = multiprocessing.Process(
                 target=_worker_serve,
-                args=(app_path, config_dict, i + 1, workers),
+                args=(app_path, config_dict, i + 1, workers, socket_fd),
                 name=f"hypercorn-worker-{i + 1}"
             )
             process.start()
@@ -228,6 +278,13 @@ class HypercornServer:
         except KeyboardInterrupt:
             logger.info("收到中断信号，正在关闭所有 workers...")
             self._cleanup_workers()
+        finally:
+            # 关闭主进程中的共享 socket
+            if shared_socket:
+                try:
+                    shared_socket.close()
+                except Exception:
+                    pass
     
     def _cleanup_workers(self) -> None:
         """清理所有 worker 进程"""

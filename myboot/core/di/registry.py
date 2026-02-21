@@ -36,7 +36,7 @@ class ServiceRegistry:
         self.services[service_name] = service_class
         self.service_configs[service_name] = config or {}
         self.dependencies[service_name] = set()
-        self.dependents[service_name] = set()
+        self.dependents.setdefault(service_name, set())
         
         # 分析依赖关系
         self._analyze_dependencies(service_name, service_class)
